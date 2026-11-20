@@ -1,0 +1,39 @@
+name: 豆包每日签到
+
+on:
+  schedule:
+    # 北京时间 09:00 = UTC 01:00
+    - cron: "0 1 * * *"
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: |
+          npm ci --if-present || npm install
+          npx playwright install chromium
+
+      - name: Run checkin
+        env:
+          DOUBAO_COOKIE: ${{ secrets.DOUBAO_COOKIE }}
+        run: node scripts/checkin.mjs
+
+      - name: Upload debug screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug-*.png
+          if-no-files-found: ignore
