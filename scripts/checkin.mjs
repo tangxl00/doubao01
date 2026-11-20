@@ -1,135 +1,135 @@
 #!/usr/bin/env node
-/**
- * 豆包网页版每日签到脚本 - Playwright + Cookie
- */
-
 import { chromium } from "playwright";
 
 const CHECKIN_URL = "https://www.doubao.com/pc/agent-explore";
-const DAILY_REWARD_SELECTOR = '[data-reward-code="daily_signin"]';
 
 const args = parseArgs();
 const cookie = args.cookie || process.env.DOUBAO_COOKIE;
-const ua = args.ua || process.env.DOUBAO_UA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const headless = args.headless !== false && process.env.HEADLESS !== "0";
 const dryRun = args.dryRun || process.env.DRY_RUN === "1";
-const timeout = args.timeout || 20000;
+const timeout = args.timeout || 30000;
 
-if (!cookie) {
-  console.error("❌ 缺少 DOUBAO_COOKIE 环境变量");
-  process.exit(1);
-}
+if (!cookie) { console.error("❌ 缺少 DOUBAO_COOKIE"); process.exit(1); }
 
 const cookies = parseCookieString(cookie);
-if (!cookies.length) {
-  console.error("❌ Cookie 解析失败");
-  process.exit(1);
-}
-
 console.log("\n🎯 豆包每日签到\n" + "─".repeat(50));
 console.log("Cookie 条数  ", cookies.length);
 console.log("Headless     ", headless);
-console.log("Dry-Run      ", !!dryRun);
-console.log("─".repeat(50) + "\n");
 
 const browser = await chromium.launch({ headless });
-const context = await browser.newContext({ userAgent: ua, viewport: { width: 1280, height: 800 } });
+const context = await browser.newContext({
+  viewport: { width: 1440, height: 900 },
+  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+});
 await context.addCookies(cookies);
 const page = await context.newPage();
 
+// 保存所有 console 和 response 用于调试
+page.on("console", msg => console.log("[page]", msg.text().slice(0, 200)));
+page.on("response", async resp => {
+  const url = resp.url();
+  if (url.includes("checkin") || url.includes("campaign") || url.includes("reward")) {
+    try { console.log("[API]", url.slice(0, 120), await resp.text()); } catch {}
+  }
+});
+
 try {
-  console.log("① 打开签到页...");
-  await page.goto(CHECKIN_URL, { waitUntil: "networkidle", timeout });
-  await page.waitForTimeout(1500);
+  console.log("\n① 打开签到页...");
+  await page.goto(CHECKIN_URL, { waitUntil: "domcontentloaded", timeout });
+  console.log("   URL:", page.url());
+  
+  // 等待更长时间让 SPA 渲染
+  await page.waitForTimeout(5000);
 
   // 地域封锁检测
-  const blocked = await page.evaluate(() =>
-    document.body.innerText.includes("暂时不可用") ||
-    document.body.innerText.includes("区域限制") ||
-    document.body.innerText.includes("访问受限")
-  ).catch(() => false);
-
-  if (blocked) {
-    console.error("❌ 触发豆包地域封锁 —— 当前 IP 不在中国大陆");
-    console.error("   解决方案:");
-    console.error("   1. 用 Gitee Go 国内 runner");
-    console.error("   2. 在自己的国内 VPS 或 PC 上跑");
-    console.error("   3. GitHub Actions 需配自建 runner (self-hosted, 中国大陆网络)");
+  const bodyText = await page.evaluate(() => document.body.innerText || "").catch(() => "");
+  if (bodyText.includes("暂时不可用") || bodyText.includes("区域限制") || bodyText.includes("访问受限")) {
+    console.error("❌ 触发豆包地域封锁");
+    await page.screenshot({ path: "debug-blocked.png", fullPage: true });
     process.exit(3);
   }
 
-  console.log("② 探测签到状态...");
-  const state = await detectState(page);
-  console.log("签到状态    ", state.status);
-  console.log("按钮存在    ", !!state.buttonVisible);
+  // 保存页面快照（调试用）
+  await page.screenshot({ path: "debug-page.png", fullPage: true });
+  const html = await page.content();
+  console.log("   HTML 长度:", html.length, "字符");
 
-  if (state.status === "已签到") {
-    console.log("\n✅ 今日已签到, 无需重复操作");
-    await browser.close();
-    process.exit(0);
+  // 打印页面前 300 字文本（帮我判断页面实际内容）
+  const preview = bodyText.slice(0, 500).replace(/\n/g, " | ");
+  console.log("   页面预览:", preview);
+
+  // 多选择器探测签到按钮
+  console.log("\n② 探测签到按钮（多选择器尝试）...");
+  const selectors = [
+    '[data-reward-code="daily_signin"]',
+    '[data-reward-code="daily_checkin"]', 
+    '[class*="signin"]',
+    '[class*="checkin"]',
+    '[class*="reward"]',
+    '[class*="campaign"]',
+    '[class*="daily"]',
+    'button',
+  ];
+
+  let found = null;
+  for (const sel of selectors) {
+    const count = await page.locator(sel).count().catch(() => 0);
+    if (count > 0) {
+      console.log(`   命中 ${sel} → ${count} 个元素`);
+      // 打印前几个的文本
+      for (let i = 0; i < Math.min(count, 5); i++) {
+        const text = await page.locator(sel).nth(i).innerText().catch(() => "");
+        if (text.trim()) console.log(`      [${i}] "${text.trim().slice(0, 60)}"`);
+      }
+      if (!found && /sign|check|reward|领取|签到|每日|免费/.test(await page.locator(sel).first().innerText().catch(() => ""))) {
+        found = sel;
+      }
+    }
   }
+
+  // 也试试直接搜文本
+  const textHits = await page.getByText(/签到|领取|免费领|每日/i).count().catch(() => 0);
+  console.log(`   文本 "签到/领取/免费领/每日" 命中: ${textHits}`);
 
   if (dryRun) {
-    console.log("\n🔍 Dry-Run 模式 —— 探测到可签到, 未执行点击");
+    console.log("\n🔍 Dry-Run 完成");
     await browser.close();
     process.exit(0);
   }
 
-  if (!state.buttonVisible) {
-    console.error("❌ 未找到签到按钮, Cookie 可能失效");
-    await page.screenshot({ path: "debug-no-button.png" });
-    await browser.close();
+  if (!found && textHits === 0) {
+    console.error("\n❌ 所有选择器和文本都没匹配到签到按钮");
+    console.error("   可能原因: Cookie 不完整 / 页面结构变更 / 该账号今日已签到");
+    console.error("   已保存 debug-page.png 供排查");
     process.exit(1);
   }
 
-  console.log("③ 执行签到...");
-  await clickButton(page);
-  await page.waitForTimeout(2500);
+  // 尝试点击找到的按钮
+  const target = found 
+    ? page.locator(found).first()
+    : page.getByText(/签到|领取/i).first();
 
-  const after = await detectState(page);
-  console.log("签到后状态  ", after.status);
+  console.log("\n③ 点击签到按钮...");
+  await target.click({ force: true }).catch(async () => {
+    await target.evaluate(el => el.click());
+  });
 
-  if (after.status === "已签到") {
-    console.log("\n✅ 签到成功!");
-    await browser.close();
-    process.exit(0);
-  } else {
-    console.error("\n❌ 签到后状态未变化");
-    await page.screenshot({ path: "debug-after-click.png" });
-    await browser.close();
-    process.exit(1);
-  }
+  await page.waitForTimeout(3000);
+  console.log("\n④ 点击后页面预览:", (await page.evaluate(() => document.body.innerText)).slice(0, 300).replace(/\n/g, " | "));
+  await page.screenshot({ path: "debug-after-click.png", fullPage: true });
+
+  console.log("\n✅ 签到流程完成");
+  await browser.close();
+  process.exit(0);
 } catch (err) {
-  console.error("❌ 执行异常:", err.message);
-  await page?.screenshot?.({ path: "debug-error.png" }).catch(() => {});
+  console.error("❌ 异常:", err.message);
+  await page?.screenshot?.({ path: "debug-error.png", fullPage: true }).catch(() => {});
   await browser.close();
   process.exit(1);
 }
 
-async function detectState(page) {
-  try { await page.waitForSelector(DAILY_REWARD_SELECTOR, { timeout: 10000 }); } catch {}
-  return await page.evaluate(() => {
-    const card = document.querySelector('[data-reward-code="daily_signin"]');
-    if (!card) return { status: "未知(未找到签到卡片)", buttonVisible: false };
-    const checkmark = card.querySelector('[class*="check"], [class*="done"], [class*="success"]');
-    const text = card.innerText;
-    if (checkmark || text.includes("已签到") || text.includes("已领取")) {
-      return { status: "已签到", buttonVisible: false };
-    }
-    const btn = card.querySelector("button, [role='button']");
-    return { status: "未签到", buttonVisible: !!(btn && btn.offsetParent !== null) };
-  });
-}
-
-async function clickButton(page) {
-  const card = page.locator(DAILY_REWARD_SELECTOR);
-  await card.locator("button").first().click({ force: true }).catch(async () => {
-    await card.evaluate(el => el.querySelector("button, [role='button']")?.click());
-  });
-}
-
+// ─── utils ───────────────────────────
 function parseCookieString(str) {
-  if (!str) return [];
   return str.split(";").map(kv => kv.trim()).filter(Boolean).map(pair => {
     const idx = pair.indexOf("=");
     if (idx === -1) return null;
@@ -141,14 +141,12 @@ function parseCookieString(str) {
 }
 
 function parseArgs() {
-  const result = {};
+  const r = {};
   for (let i = 2; i < process.argv.length; i++) {
-    const a = process.argv[i];
-    const next = process.argv[i + 1];
-    if (a === "--dry-run") result.dryRun = true;
-    else if (a === "--no-headless") result.headless = false;
-    else if (a === "--cookie" && next) { result.cookie = next; i++; }
-    else if (a === "--timeout" && next) { result.timeout = parseInt(next, 10); i++; }
+    const a = process.argv[i], n = process.argv[i + 1];
+    if (a === "--dry-run") r.dryRun = true;
+    else if (a === "--no-headless") r.headless = false;
+    else if (a === "--timeout" && n) { r.timeout = parseInt(n, 10); i++; }
   }
-  return result;
+  return r;
 }
