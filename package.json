@@ -1,0 +1,13 @@
+{
+  "name": "doubao-auto-checkin",
+  "version": "1.0.0",
+  "description": "豆包每日自动签到",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "checkin": "node scripts/checkin.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}
